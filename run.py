@@ -4,15 +4,17 @@ Entry point of the emergency response decision-support system.
 Usage:
     python run.py src/Scenarios/Scenario1
 
-Current state (step 1): load a scenario, run the sanity checks, and show for
+Current state (step 2): load a scenario, run the sanity checks, show for
 every incident the travel time of each capable responder under normal road
-conditions (A*). Later steps will add road-state inference, traffic
-filtering, allocation and finally write plan.json and statistics.txt.
+conditions (A*), and show the Bayesian belief about the status of every
+reported road. Later steps will add traffic filtering, allocation and
+finally write plan.json and statistics.txt.
 """
 
 import argparse
 import sys
 
+from src.bayes import road_status_beliefs
 from src.checks import check_scenario, summarize
 from src.data import Scenario, load_scenario
 from src.search import astar
@@ -43,6 +45,23 @@ def print_routing_overview(scenario: Scenario) -> None:
                   + (f" (others: {others})" if others else ""))
 
 
+def print_road_beliefs(scenario: Scenario) -> None:
+    """P(Status | weather, reports) for every road that has reports.
+    Roads without reports all get the same prior belief (printed once)."""
+    beliefs = road_status_beliefs(scenario)
+    reported = {(r.from_node, r.to_node) for r in scenario.road_reports}
+    print("\nRoad status beliefs (Bayesian network, P(Open) / P(Congested) / P(Blocked)):")
+    for road in sorted(reported):
+        d = beliefs[road]
+        flag = "  -> treated as BLOCKED (P(Blocked) > 0.5)" if d["Blocked"] > 0.5 else ""
+        print(f"  {road[0]:>3}->{road[1]:<4} {d['Open']:.3f} / {d['Congested']:.3f} / {d['Blocked']:.3f}{flag}")
+    unreported = [r for r in scenario.graph.roads if r not in reported]
+    if unreported:
+        d = beliefs[unreported[0]]
+        print(f"  {len(unreported)} roads without reports: "
+              f"{d['Open']:.3f} / {d['Congested']:.3f} / {d['Blocked']:.3f} (prior, weather unknown)")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Emergency response planner")
     parser.add_argument(
@@ -63,6 +82,7 @@ def main() -> int:
     print("  input checks passed")
 
     print_routing_overview(scenario)
+    print_road_beliefs(scenario)
     return 0
 
 
