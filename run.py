@@ -4,62 +4,80 @@ Entry point of the emergency response decision-support system.
 Usage:
     python run.py src/Scenarios/Scenario1
 
-Current state (step 2): load a scenario, run the sanity checks, show for
-every incident the travel time of each capable responder under normal road
-conditions (A*), and show the Bayesian belief about the status of every
-reported road. Later steps will add traffic filtering, allocation and
+Current state (step 4): load a scenario, run the sanity checks, show the
+Bayes net belief about every reported road, the HMM belief about traffic,
+and for every incident the expected travel time of each capable responder
+with A* on the resulting road costs. Later steps add the allocation and
 finally write plan.json and statistics.txt.
 """
 
 import argparse
 import sys
 
-from src.bayes import road_status_beliefs
 from src.checks import check_scenario, summarize
 from src.data import Scenario, load_scenario
-from src.search import astar
+from src.hmm import viterbi
+from src.search import astar, base_cost
+from src.travel_time import TravelTimeModel
 
 
-def print_routing_overview(scenario: Scenario) -> None:
-    """For each incident: A* travel time (normal conditions) of every capable
-    responder from its start location. Only a demonstration of step 1; the
-    real allocation comes in step 5."""
-    print("\nRouting under normal conditions (A*, seconds from start location):")
-    for inc in scenario.incidents:
-        options = []
-        for r in scenario.responders:
-            if inc.required_capability not in r.capabilities:
-                continue
-            route = astar(scenario.graph, r.start_location, inc.location)
-            if route is not None:
-                options.append((route.cost, r.id, route.path))
-        options.sort()
-        best = options[0] if options else None
-        line = f"  {inc.id:<4} {inc.priority:<8} at {inc.location:<4} needs {inc.required_capability:<20}"
-        if best is None:
-            print(line + " -> no capable responder can reach it")
-        else:
-            cost, rid, path = best
-            others = ", ".join(f"{o[1]} {o[0]:.0f}s" for o in options[1:])
-            print(line + f" -> fastest {rid} {cost:.1f}s via {'-'.join(path)}"
-                  + (f" (others: {others})" if others else ""))
-
-
-def print_road_beliefs(scenario: Scenario) -> None:
-    """P(Status | weather, reports) for every road that has reports.
+def print_road_beliefs(scenario: Scenario, model: TravelTimeModel) -> None:
+    """Bayes net: P(Status | evidence) for every road that has reports.
     Roads without reports all get the same prior belief (printed once)."""
-    beliefs = road_status_beliefs(scenario)
     reported = {(r.from_node, r.to_node) for r in scenario.road_reports}
-    print("\nRoad status beliefs (Bayesian network, P(Open) / P(Congested) / P(Blocked)):")
+    print("\nRoad status (Bayes net, P(Open) / P(Congested) / P(Blocked)):")
     for road in sorted(reported):
-        d = beliefs[road]
-        flag = "  -> treated as BLOCKED (P(Blocked) > 0.5)" if d["Blocked"] > 0.5 else ""
+        d = model.status_beliefs[road]
+        flag = f"  -> BLOCKED (P(Blocked) > {model.blocked_threshold})" if model.is_blocked(
+            scenario.graph.road(*road)) else ""
         print(f"  {road[0]:>3}->{road[1]:<4} {d['Open']:.3f} / {d['Congested']:.3f} / {d['Blocked']:.3f}{flag}")
     unreported = [r for r in scenario.graph.roads if r not in reported]
     if unreported:
-        d = beliefs[unreported[0]]
+        d = model.status_beliefs[unreported[0]]
         print(f"  {len(unreported)} roads without reports: "
-              f"{d['Open']:.3f} / {d['Congested']:.3f} / {d['Blocked']:.3f} (prior, weather unknown)")
+              f"{d['Open']:.3f} / {d['Congested']:.3f} / {d['Blocked']:.3f} (Weather hidden)")
+
+
+def print_traffic_beliefs(scenario: Scenario, model: TravelTimeModel) -> None:
+    """HMM: belief after the last observation, the resulting traffic factor,
+    and the Viterbi sequence (analysis only)."""
+    print("\nTraffic (HMM, B(Low) / B(Medium) / B(High) after the last observation):")
+    hmm = scenario.traffic_probabilities
+    for road, obs in sorted(scenario.traffic_observations.items()):
+        b = model.traffic_beliefs[road]
+        factor = model.traffic_factor(scenario.graph.road(*road))
+        seq = "".join(o[0] for o in obs)
+        vit = "".join(x[0] for x in viterbi(obs, hmm))
+        print(f"  {road[0]:>3}->{road[1]:<4} {b['Low']:.2f} / {b['Medium']:.2f} / {b['High']:.2f}"
+              f"  factor x{factor:.3f}  observed {seq:<10} Viterbi {vit}")
+
+
+def print_routing_overview(scenario: Scenario, model: TravelTimeModel) -> None:
+    """For each incident: expected travel time (A* on model costs) of every
+    capable responder from its start location, next to the normal time.
+    Only a demonstration; the real allocation comes in step 5."""
+    print("\nExpected travel time per incident (A*, seconds from start location; normal time in brackets):")
+    for inc in scenario.incidents:
+        options, unreachable = [], []
+        for r in scenario.responders:
+            if inc.required_capability not in r.capabilities:
+                continue
+            route = astar(scenario.graph, r.start_location, inc.location, model.cost)
+            if route is None:
+                unreachable.append(r.id)
+                continue
+            normal = astar(scenario.graph, r.start_location, inc.location, base_cost)
+            options.append((route.cost, r.id, route.path, normal.cost))
+        options.sort()
+        line = f"  {inc.id:<4} {inc.priority:<8} at {inc.location:<4} needs {inc.required_capability:<20}"
+        if not options:
+            print(line + " -> NO capable responder can reach it")
+            continue
+        cost, rid, path, normal = options[0]
+        others = ", ".join(f"{o[1]} {o[0]:.0f}s" for o in options[1:])
+        print(line + f" -> fastest {rid} {cost:.1f}s ({normal:.1f}s) via {'-'.join(path)}"
+              + (f"; others: {others}" if others else "")
+              + (f"; cut off: {', '.join(unreachable)}" if unreachable else ""))
 
 
 def main() -> int:
@@ -81,8 +99,10 @@ def main() -> int:
         return 1
     print("  input checks passed")
 
-    print_routing_overview(scenario)
-    print_road_beliefs(scenario)
+    model = TravelTimeModel.from_scenario(scenario)
+    print_road_beliefs(scenario, model)
+    print_traffic_beliefs(scenario, model)
+    print_routing_overview(scenario, model)
     return 0
 
 
