@@ -4,20 +4,26 @@ Entry point of the emergency response decision-support system.
 Usage:
     python run.py src/Scenarios/Scenario1
 
-Current state (step 4): load a scenario, run the sanity checks, show the
-Bayes net belief about every reported road, the HMM belief about traffic,
-and for every incident the expected travel time of each capable responder
-with A* on the resulting road costs. Later steps add the allocation and
-finally write plan.json and statistics.txt.
+    python run.py src/Scenarios/Scenario1 --allocator greedy --details
+
+Current state (step 6): load a scenario, run the sanity checks, build the
+travel-time model (Bayes net + HMM), run the online simulation with the CSP
+allocator (OR-Tools) or the greedy baseline, and write plan.json.
+--details also prints the road beliefs, traffic beliefs and expected travel
+times. statistics.txt follows in step 7.
 """
 
 import argparse
+import importlib.util
+import json
 import sys
+from pathlib import Path
 
 from src.checks import check_scenario, summarize
 from src.data import Scenario, load_scenario
 from src.hmm import viterbi
 from src.search import astar, base_cost
+from src.simulation import simulate
 from src.travel_time import TravelTimeModel
 
 
@@ -84,7 +90,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Emergency response planner")
     parser.add_argument(
         "scenario", help="path to a scenario folder, e.g. src/Scenarios/Scenario1")
+    parser.add_argument("--allocator", choices=["csp", "greedy"], default="csp",
+                        help="csp = OR-Tools constraint model (default), greedy = baseline")
+    parser.add_argument("--out", help="output folder (default: output/<scenario name>)")
+    parser.add_argument("--details", action="store_true",
+                        help="also print road beliefs, traffic beliefs and travel times")
     args = parser.parse_args()
+
+    if args.allocator == "csp" and importlib.util.find_spec("ortools") is None:
+        print("OR-Tools is not installed: run 'pip install ortools' or use --allocator greedy")
+        return 2
 
     scenario = load_scenario(args.scenario)
     print(summarize(scenario))
@@ -100,9 +115,23 @@ def main() -> int:
     print("  input checks passed")
 
     model = TravelTimeModel.from_scenario(scenario)
-    print_road_beliefs(scenario, model)
-    print_traffic_beliefs(scenario, model)
-    print_routing_overview(scenario, model)
+    if args.details:
+        print_road_beliefs(scenario, model)
+        print_traffic_beliefs(scenario, model)
+        print_routing_overview(scenario, model)
+
+    result = simulate(scenario, model, args.allocator)
+    print(f"\nOnline simulation ({args.allocator} allocator, {result.decisions} decisions):")
+    for line in result.log:
+        print("  " + line)
+    if result.unhandled:
+        print(f"  unhandled: {', '.join(i.id for i in result.unhandled)}")
+
+    out = Path(args.out) if args.out else Path("output") / scenario.name
+    out.mkdir(parents=True, exist_ok=True)
+    plan = [a.to_json() for a in sorted(result.assignments, key=lambda a: (a.departure, a.responder_id))]
+    (out / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    print(f"\nWrote {out / 'plan.json'} ({len(plan)} assignments)")
     return 0
 
 
