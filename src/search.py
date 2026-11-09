@@ -1,12 +1,12 @@
 """
 Step 1 - Route planning with Uniform-Cost Search (UCS) and A*.
 
-Problem formulation (as a search problem):
-    state         a node of the city graph
-    initial state the responder's current location
-    goal test     state == incident location
-    actions       drive along one directed road leaving the current node
-    step cost     travel time of that road in seconds (given by `cost_fn`)
+Search problem (course terminology, CS188 note 1):
+    state space         the nodes of the city graph
+    start state         the responder's current location
+    goal test           state == incident location
+    successor function  every directed road leaving the state; its cost is
+                        the travel time in seconds (given by `cost_fn`)
 
 The step cost is NOT fixed in this module. It is passed in as a function
 `cost_fn(road) -> seconds or None`, where None means "road is unusable".
@@ -14,20 +14,23 @@ In step 1 we use the normal travel time (distance / speed). In step 4 the
 same search will receive a cost function built from the Bayesian network
 and the HMM, without changing this file.
 
-UCS and A* are the same algorithm with a different priority:
-    UCS:  f(n) = g(n)            (cost so far)
-    A*:   f(n) = g(n) + h(n)     (cost so far + estimate of remaining cost)
-With h(n) = 0, A* is exactly UCS. That is how it is implemented below.
+UCS and A* are the same graph search with a different fringe priority:
+    UCS:  f(n) = g(n)            (backward cost)
+    A*:   f(n) = g(n) + h(n)     (backward cost + estimated forward cost)
+With the trivial heuristic h(n) = 0, A* is exactly UCS. That is how it is
+implemented below.
 
 Heuristic (A*):
     h(n) = straight_line_distance(n, goal) / max_speed
 
-Why this is admissible (never overestimates): every road is at least as
-long as the straight line between its endpoints (checked in step 0), and
-no road is faster than max_speed. By the triangle inequality, any route
-from n to the goal is at least straight_line_distance(n, goal) long, and
-driving it takes at least that distance / max_speed seconds. Multiplying
-travel times by factors >= 1 (congestion, traffic) keeps this true.
+This is the exact cost of a relaxed problem (straight line, top speed).
+Admissible, 0 <= h(n) <= h*(n): every road is at least as long as the
+straight line between its endpoints (checked in step 0) and no road is
+faster than max_speed, so no route can be cheaper than h(n).
+Consistent, h(A) - h(C) <= cost(A, C): same argument for a single road
+plus the triangle inequality. Consistency is what A* GRAPH search (with a
+closed set) needs to stay optimal. Multiplying travel times by factors
+>= 1 (congestion, traffic) keeps both properties.
 """
 
 from __future__ import annotations
@@ -54,7 +57,7 @@ def base_cost(road: Road) -> float:
 class SearchResult:
     path: list[str]  # nodes from start to goal (inclusive)
     cost: float  # total travel time in seconds
-    expanded: int  # number of nodes taken from the frontier and expanded
+    expanded: int  # number of nodes removed from the fringe and expanded
 
 
 def straight_line_heuristic(graph: CityGraph, goal: str) -> Heuristic:
@@ -76,33 +79,33 @@ def best_first_search(
     cost_fn: CostFunction = base_cost,
     heuristic: Heuristic = lambda node: 0.0,
 ) -> Optional[SearchResult]:
-    """Graph search that always expands the frontier node with the lowest f = g + h.
+    """Graph search that always expands the fringe node with the lowest f = g + h.
 
     Returns None when the goal cannot be reached (e.g. all routes blocked).
     """
-    # Frontier: priority queue of (f, tie_breaker, node).
+    # Fringe: priority queue of (f, tie_breaker, node).
     # The tie_breaker (a counter) keeps the order deterministic when f is equal.
     counter = 0
-    frontier: list[tuple[float, int, str]] = [(heuristic(start), counter, start)]
+    fringe: list[tuple[float, int, str]] = [(heuristic(start), counter, start)]
 
-    g: dict[str, float] = {start: 0.0}  # best known cost from start to each node
+    g: dict[str, float] = {start: 0.0}  # backward cost: best known cost from start
     parent: dict[str, Optional[str]] = {start: None}  # to rebuild the path
-    expanded: set[str] = set()  # nodes already expanded ("explored set")
+    closed: set[str] = set()  # closed set: nodes already expanded
 
-    while frontier:
-        _, _, node = heapq.heappop(frontier)
+    while fringe:
+        _, _, node = heapq.heappop(fringe)
 
-        # The same node can be in the frontier several times with different
-        # priorities; only the first (cheapest) time it is popped counts.
-        if node in expanded:
+        # The same node can be on the fringe several times with different
+        # priorities; only the first (cheapest) time it is removed counts.
+        if node in closed:
             continue
 
-        # Goal test when a node is EXPANDED, not when it is generated.
-        # Only then is g(goal) guaranteed to be optimal.
+        # Goal test when a node is REMOVED from the fringe, not when it is
+        # added. Only then is g(goal) guaranteed to be optimal.
         if node == goal:
-            return SearchResult(_rebuild_path(parent, goal), g[goal], len(expanded) + 1)
+            return SearchResult(_rebuild_path(parent, goal), g[goal], len(closed) + 1)
 
-        expanded.add(node)
+        closed.add(node)
 
         for neighbour in graph.neighbours(node):
             step = cost_fn(graph.road(node, neighbour))
@@ -113,9 +116,9 @@ def best_first_search(
                 g[neighbour] = new_g
                 parent[neighbour] = node
                 counter += 1
-                heapq.heappush(frontier, (new_g + heuristic(neighbour), counter, neighbour))
+                heapq.heappush(fringe, (new_g + heuristic(neighbour), counter, neighbour))
 
-    return None  # frontier empty: goal unreachable
+    return None  # fringe empty: goal unreachable
 
 
 def _rebuild_path(parent: dict[str, Optional[str]], goal: str) -> list[str]:

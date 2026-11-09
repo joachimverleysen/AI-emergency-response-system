@@ -83,12 +83,13 @@ def normalize(dist: dict[str, float]) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# Inference by enumeration
+# Inference by enumeration (CS188 note 6)
 #
-#   P(X | e) = alpha * sum_{y} P(X, e, y)
+#   P(Q | e) = alpha * sum_{h} P(Q, e, h)
 #
-# where y ranges over all hidden variables. The joint probability is the
-# product of the CPT entries of all variables (chain rule for BNs):
+# Take the rows of the joint consistent with the evidence e, sum out the
+# hidden variables h, and normalize. Each row of the joint comes from the
+# chain rule for Bayes nets:
 #   P(x1, ..., xn) = prod_i P(xi | parents(Xi))
 # ---------------------------------------------------------------------------
 def enumeration_ask(query: str, evidence: Assignment, bn: BayesNet) -> dict[str, float]:
@@ -114,10 +115,11 @@ def _enumerate_all(variables: list[Variable], assignment: Assignment) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Variable elimination
+# Variable elimination (CS188 note 6)
 #
-# Same answer as enumeration, but works with factors (tables) and sums out a
-# hidden variable as soon as possible, so that sub-results are not recomputed.
+# Same answer as enumeration, but works with factors (unnormalized tables).
+# To eliminate a hidden variable X:  1. join all factors involving X,
+#                                    2. sum out X.
 # ---------------------------------------------------------------------------
 @dataclass
 class Factor:
@@ -139,7 +141,8 @@ def _make_factor(var: Variable, evidence: Assignment, bn: BayesNet) -> Factor:
     return Factor(tuple(scope), table)
 
 
-def _pointwise_product(f1: Factor, f2: Factor, bn: BayesNet) -> Factor:
+def _join(f1: Factor, f2: Factor, bn: BayesNet) -> Factor:
+    """Join (pointwise multiply) two factors."""
     scope = list(f1.variables) + [v for v in f2.variables if v not in f1.variables]
     domains = [bn.variable(v).domain for v in scope]
     table = {}
@@ -152,14 +155,14 @@ def _pointwise_product(f1: Factor, f2: Factor, bn: BayesNet) -> Factor:
 
 
 def _sum_out(var: str, factors: list[Factor], bn: BayesNet) -> list[Factor]:
-    """Multiply all factors that mention `var`, then sum `var` away."""
+    """Join all factors that involve `var`, then sum `var` out."""
     with_var = [f for f in factors if var in f.variables]
     without_var = [f for f in factors if var not in f.variables]
     if not with_var:
         return factors
     joined = with_var[0]
     for f in with_var[1:]:
-        joined = _pointwise_product(joined, f, bn)
+        joined = _join(joined, f, bn)
     i = joined.variables.index(var)
     scope = joined.variables[:i] + joined.variables[i + 1:]
     table: dict[tuple[str, ...], float] = {}
@@ -179,7 +182,7 @@ def elimination_ask(query: str, evidence: Assignment, bn: BayesNet) -> dict[str,
     # Only factors over the query variable (or constants) remain.
     result = factors[0]
     for f in factors[1:]:
-        result = _pointwise_product(result, f, bn)
+        result = _join(result, f, bn)
     return normalize({value: result.table[(value,)] for value in bn.variable(query).domain})
 
 
