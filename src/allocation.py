@@ -170,4 +170,37 @@ def greedy_allocate(pending: list[Incident], options: list[Option]) -> dict[str,
     return choice
 
 
-ALLOCATORS = {"csp": csp_allocate, "greedy": greedy_allocate}
+# -----------------------------------------------------------------------------
+# Exhaustive allocator (reference)
+# -----------------------------------------------------------------------------
+def exhaustive_allocate(pending: list[Incident], options: list[Option], limit: int = 200_000) -> dict[str, Option]:
+    """Depth-first search over every assignment, minimising exactly the same
+    objective as the CSP (`total_cost`). Exponential, so only usable for small
+    decision moments; it is the reference that the CSP is tested against and
+    lets the experiments run without OR-Tools. Ties: the first optimal
+    assignment found (incident order, 'unassigned' tried first) is kept."""
+    per_incident = [[o for o in options if o.incident_id == inc.id] for inc in pending]
+    best: dict = {"cost": None, "choice": {}}
+    visited = [0]
+
+    def dfs(k: int, used: frozenset, choice: dict[str, Option]) -> None:
+        visited[0] += 1
+        if visited[0] > limit:
+            raise RuntimeError("decision moment too large for exhaustive search")
+        if k == len(pending):
+            cost = total_cost(choice, pending)
+            if best["cost"] is None or cost < best["cost"]:
+                best["cost"], best["choice"] = cost, dict(choice)
+            return
+        dfs(k + 1, used, choice)  # incident k stays unassigned
+        for o in per_incident[k]:
+            if o.responder_id not in used:  # constraint: one incident per responder
+                choice[o.incident_id] = o
+                dfs(k + 1, used | {o.responder_id}, choice)
+                del choice[o.incident_id]
+
+    dfs(0, frozenset(), {})
+    return best["choice"]
+
+
+ALLOCATORS = {"csp": csp_allocate, "greedy": greedy_allocate, "exhaustive": exhaustive_allocate}

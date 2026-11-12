@@ -61,7 +61,7 @@ class Assignment:
             "responder_id": self.responder_id,
             "incident_id": self.incident_id,
             "path": self.path,
-            "time": round(self.departure, 2),
+            "time": self.departure,  # not rounded: rounding down can put it before the responder is free
         }
 
 

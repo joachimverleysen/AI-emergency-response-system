@@ -6,11 +6,12 @@ Usage:
 
     python run.py src/Scenarios/Scenario1 --allocator greedy --details
 
-Current state (step 6): load a scenario, run the sanity checks, build the
-travel-time model (Bayes net + HMM), run the online simulation with the CSP
-allocator (OR-Tools) or the greedy baseline, and write plan.json.
+Pipeline: load a scenario and check it, build the travel-time model (Bayes
+net + HMM), run the online simulation with the CSP allocator (OR-Tools), the
+greedy baseline or the exhaustive reference, write plan.json, read it back,
+validate it independently and write statistics.txt.
 --details also prints the road beliefs, traffic beliefs and expected travel
-times. statistics.txt follows in step 7.
+times.
 """
 
 import argparse
@@ -24,7 +25,9 @@ from src.data import Scenario, load_scenario
 from src.hmm import viterbi
 from src.search import astar, base_cost
 from src.simulation import simulate
+from src.stats import compute_statistics, format_statistics
 from src.travel_time import TravelTimeModel
+from src.validation import load_plan, validate_plan
 
 
 def print_road_beliefs(scenario: Scenario, model: TravelTimeModel) -> None:
@@ -90,8 +93,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Emergency response planner")
     parser.add_argument(
         "scenario", help="path to a scenario folder, e.g. src/Scenarios/Scenario1")
-    parser.add_argument("--allocator", choices=["csp", "greedy"], default="csp",
-                        help="csp = OR-Tools constraint model (default), greedy = baseline")
+    parser.add_argument("--allocator", choices=["csp", "greedy", "exhaustive"], default="csp",
+                        help="csp = OR-Tools constraint model (default), greedy = baseline, "
+                             "exhaustive = reference search (small scenarios only)")
     parser.add_argument("--out", help="output folder (default: output/<scenario name>)")
     parser.add_argument("--details", action="store_true",
                         help="also print road beliefs, traffic beliefs and travel times")
@@ -132,7 +136,22 @@ def main() -> int:
     plan = [a.to_json() for a in sorted(result.assignments, key=lambda a: (a.departure, a.responder_id))]
     (out / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     print(f"\nWrote {out / 'plan.json'} ({len(plan)} assignments)")
-    return 0
+
+    # Validate the plan as written to disk, independently of the simulation.
+    report = validate_plan(load_plan(out / "plan.json"), scenario, model)
+    for e in report.errors:
+        print(f"  INVALID: {e}")
+    print(f"Plan validation: {'OK' if report.valid else 'FAILED'} "
+          f"({len(report.errors)} errors, {len(report.warnings)} late arrivals)")
+
+    stats = compute_statistics(scenario, report)
+    notes = [f"Scenario: {scenario.name}; allocator: {args.allocator}; "
+             f"blocked threshold: {model.blocked_threshold}; plan valid: {report.valid}"]
+    text = format_statistics(stats, notes)
+    (out / "statistics.txt").write_text(text, encoding="utf-8")
+    print(f"Wrote {out / 'statistics.txt'}\n")
+    print(text.split("\nDetails")[0])
+    return 0 if report.valid else 1
 
 
 if __name__ == "__main__":
