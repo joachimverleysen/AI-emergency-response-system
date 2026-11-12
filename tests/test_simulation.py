@@ -16,7 +16,7 @@ from src.data import load_scenario
 from src.search import path_cost
 from src.simulation import simulate
 from src.travel_time import TravelTimeModel
-from tests.oracle import exhaustive_allocate
+from tests.oracle import exhaustive_allocate, last_optimal_allocate
 
 HAS_ORTOOLS = importlib.util.find_spec("ortools") is not None
 SCENARIOS = Path(__file__).resolve().parent.parent / "src" / "Scenarios"
@@ -84,21 +84,25 @@ class TestGreedySimulation(PlanInvariants, unittest.TestCase):
 class TestOracleSimulation(PlanInvariants, unittest.TestCase):
     allocator = staticmethod(exhaustive_allocate)
 
+    def test_ties_change_the_outcome(self):
+        # Scenario 3, t = 0: I4 (First aid) can go to R1 or R2, both at H1 with
+        # the same arrival time, so both choices are optimal at that moment.
+        # At t = 1140, I11 (Medical emergency) appears at the same node N8 and
+        # only R1 or R3 can handle it. If R1 was sent to I4 it is already there;
+        # if R2 was sent, R1 must still drive from H1 and arrives too late.
+        # A planner that cannot see the future cannot know which tie is better,
+        # so two OPTIMAL allocators can give different simulations.
+        s = ALL[2]
+        model = TravelTimeModel.from_scenario(s)
+        first = simulate(s, model, exhaustive_allocate)
+        last = simulate(s, model, last_optimal_allocate)
+        self.assertEqual(sum(a.deadline_met for a in first.assignments), 13)
+        self.assertEqual(sum(a.deadline_met for a in last.assignments), 12)
+
 
 @unittest.skipUnless(HAS_ORTOOLS, "OR-Tools not installed")
 class TestCSPSimulation(PlanInvariants, unittest.TestCase):
     allocator = "csp"
-
-    def test_same_quality_as_oracle(self):
-        for s in ALL:
-            model = TravelTimeModel.from_scenario(s)
-            csp = simulate(s, model, "csp")
-            oracle = simulate(s, model, exhaustive_allocate)
-            with self.subTest(scenario=s.name):
-                self.assertEqual(sum(a.deadline_met for a in csp.assignments),
-                                 sum(a.deadline_met for a in oracle.assignments))
-                self.assertAlmostEqual(sum(a.response_time for a in csp.assignments),
-                                       sum(a.response_time for a in oracle.assignments), places=3)
 
 
 if __name__ == "__main__":
